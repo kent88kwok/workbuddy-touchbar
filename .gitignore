@@ -1,0 +1,15 @@
+# 构建产物
+build/
+*.app
+*.o
+*.dSYM/
+
+# 系统 / 编辑器
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# 运行期日志与状态（含本机数据）
+*.log
+wb-touchbar-state.json
