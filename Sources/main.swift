@@ -7,7 +7,6 @@
 import AppKit
 import CryptoKit
 import Darwin
-import ServiceManagement
 import SQLite3
 
 // MARK: - 诊断日志
@@ -537,7 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem.separator())
         let auto = menu.addItem(withTitle: "开机自启动", action: #selector(toggleAutoStart), keyEquivalent: "")
         auto.target = self
-        auto.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        auto.state = autoStartEnabled ? .on : .off
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
@@ -695,14 +694,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.refreshCloud() }
     }
 
+    // MARK: 开机自启动 (LaunchAgent 方案, 替换 macOS 13+ 的 SMAppService, 兼容 Monterey)
+
+    private static let agentLabel = "local.user.workbuddy-touchbar"
+
+    private var launchAgentPlistPath: String {
+        NSString(string: "~/Library/LaunchAgents/\(Self.agentLabel).plist").expandingTildeInPath
+    }
+
+    private var autoStartEnabled: Bool {
+        FileManager.default.fileExists(atPath: launchAgentPlistPath)
+    }
+
     @objc func toggleAutoStart() {
-        do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
+        let path = launchAgentPlistPath
+        let label = Self.agentLabel
+        let runLaunchctl: (String) -> Void = { sub in
+            let t = Process()
+            t.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            // load/unload 接 plist 路径, remove 接 label
+            t.arguments = [sub, sub == "load" || sub == "unload" ? path : label]
+            try? t.run()
+            t.waitUntilExit()
+        }
+        if autoStartEnabled {
+            runLaunchctl("remove")
+            try? FileManager.default.removeItem(atPath: path)
+            WbLog.write("开机自启动: 已关闭 (移除 LaunchAgent)")
+        } else {
+            let exe = Bundle.main.executablePath ?? "/Applications/WorkBuddyTouchBar.app/Contents/MacOS/WorkBuddyTouchBar"
+            let plist = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>Label</key><string>\(label)</string>
+                <key>ProgramArguments</key>
+                <array>
+                    <string>\(exe)</string>
+                </array>
+                <key>RunAtLoad</key><true/>
+            </dict>
+            </plist>
+            """
+            do {
+                let dir = NSString(string: "~/Library/LaunchAgents").expandingTildeInPath
+                try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                try plist.write(toFile: path, atomically: true, encoding: .utf8)
+                runLaunchctl("load")
+                WbLog.write("开机自启动: 已开启 (LaunchAgent 已写入并加载)")
+            } catch {
+                NSSound.beep()
+                WbLog.write("开机自启动: 写入失败 \(error)")
             }
-        } catch { NSSound.beep() }
+        }
     }
 
     // MARK: TouchBar 常驻项 (全部走 runtime, 兼容类被移除的系统)
